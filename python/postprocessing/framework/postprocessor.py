@@ -1,8 +1,6 @@
 #!/usr/bin/env python
 import os
 import time
-import hashlib
-import subprocess
 import ROOT
 ROOT.PyConfig.IgnoreCommandLineOptions = True
 from PhysicsTools.NanoAODTools.postprocessing.framework.branchselection import BranchSelection
@@ -14,8 +12,7 @@ from PhysicsTools.NanoAODTools.postprocessing.framework.jobreport import JobRepo
 
 class PostProcessor :
     def __init__(self,outputDir,inputFiles,cut=None,branchsel=None,modules=[],compression="LZMA:9",friend=False,postfix=None,
-		 jsonInput=None,noOut=False,justcount=False,provenance=False,haddFileName=None,fwkJobReport=False,histFileName=None,histDirName=None, outputbranchsel=None,maxEntries=None,firstEntry=0,
-		 prefetch=False,longTermCache=False):
+		 jsonInput=None,noOut=False,justcount=False,provenance=False,haddFileName=None,fwkJobReport=False,histFileName=None,histDirName=None, outputbranchsel=None):
 	self.outputDir=outputDir
 	self.inputFiles=inputFiles
 	self.cut=cut
@@ -35,44 +32,9 @@ class PostProcessor :
 		print "Because you requested a FJR we assume you want the final hadd. No name specified for the output file, will use tree.root"
 		self.haddFileName="tree.root"
  	self.branchsel = BranchSelection(branchsel) if branchsel else None 
-        if outputbranchsel != None:
-            self.outputbranchsel = BranchSelection(outputbranchsel)
-        elif outputbranchsel == None and branchsel != None:
-            # Use the same branches in the output as in input
-            self.outputbranchsel = BranchSelection(branchsel)
-        else: 
-            self.outputbranchsel = None
-
+        self.outputbranchsel = BranchSelection(outputbranchsel) if outputbranchsel else None
         self.histFileName=histFileName
         self.histDirName=histDirName
-        self.maxEntries = maxEntries if maxEntries else 9223372036854775807L # 2^63 - 1, largest int64
-        self.firstEntry = firstEntry
-        self.prefetch = prefetch # prefetch files to TMPDIR using xrdcp
-        self.longTermCache = longTermCache # keep cached files across runs (it's then up to you to clean up the temp)
-    def prefetchFile(self, fname, verbose=True):
-        tmpdir = os.environ['TMPDIR'] if 'TMPDIR' in os.environ else "/tmp"
-        if not fname.startswith("root://"):
-            return fname, False
-        rndchars  = "".join([hex(ord(i))[2:] for i in os.urandom(8)]) if not self.longTermCache else "long_cache-id%d-%s" % (os.getuid(), hashlib.sha1(fname).hexdigest());
-        localfile = "%s/%s-%s.root" % (tmpdir, os.path.basename(fname).replace(".root",""), rndchars)
-        if self.longTermCache and os.path.exists(localfile):
-            if verbose: print "Filename %s is already available in local path %s " % (fname,localfile) 
-            return localfile, False
-        try:
-            if verbose: print "Filename %s is remote, will do a copy to local path %s " % (fname,localfile) 
-            start = time.clock()
-            subprocess.check_output(["xrdcp","-f","-N",fname,localfile])
-            if verbose: print "Time used for transferring the file locally: %s s" % (time.clock() - start) 
-            return localfile, (not self.longTermCache)
-        except:
-            if verbose: print "Error: could not save file locally, will run from remote" 
-            if os.path.exists(localfile):
-                if verbose: print "Deleting partially transferred file %s" % localfile
-                try:
-                    os.unlink(localfile)
-                except:
-                    pass
-            return fname, False
     def run(self) :
         outpostfix = self.postfix if self.postfix != None else ("_Friend" if self.friend else "_Skim")
     	if not self.noOut:
@@ -115,7 +77,7 @@ class PostProcessor :
 
 	fullClone = (len(self.modules) == 0)
 	outFileNames=[]
-        t0 = time.time()
+        t0 = time.clock()
 	totEntriesRead=0
 	for fname in self.inputFiles:
 	    ffnames = []
@@ -124,26 +86,19 @@ class PostProcessor :
 	        fname, ffnames = fnames[0], fnames[1:]
 
 	    # open input file
-	    if self.prefetch:
-	        ftoread, toBeDeleted = self.prefetchFile(fname)
-	        inFile = ROOT.TFile.Open(ftoread)
-	    else:
-	        inFile = ROOT.TFile.Open(fname)
+	    inFile = ROOT.TFile.Open(fname)
 
 	    #get input tree
 	    inTree = inFile.Get("Events")
 	    if inTree == None: inTree = inFile.Get("Friends")
-	    nEntries = min(inTree.GetEntries() - self.firstEntry, self.maxEntries)
-	    totEntriesRead+=nEntries
+	    totEntriesRead+=inTree.GetEntries()
 	    # pre-skimming
-	    elist,jsonFilter = preSkim(inTree, self.json, self.cut, maxEntries = self.maxEntries, firstEntry = self.firstEntry)
+	    elist,jsonFilter = preSkim(inTree, self.json, self.cut)
 	    if self.justcount:
-		print 'Would select %d / %d entries from %s (%.2f%%)'%(elist.GetN() if elist else nEntries, nEntries, fname, (elist.GetN() if elist else nEntries)/(0.01*nEntries) if nEntries else 0)
-		if self.prefetch:
-		    if toBeDeleted: os.unlink(ftoread)
+		print 'Would select %d entries from %s'%(elist.GetN() if elist else inTree.GetEntries(), fname)
 		continue
 	    else:
-		print 'Pre-select %d entries out of %s (%.2f%%)'%(elist.GetN() if elist else nEntries,nEntries,(elist.GetN() if elist else nEntries)/(0.01*nEntries) if nEntries else 0)
+		print 'Pre-select %d entries out of %s '%(elist.GetN() if elist else inTree.GetEntries(),inTree.GetEntries())
 		inAddFiles = []
 		inAddTrees = []
 	    for ffname in ffnames:
@@ -177,25 +132,20 @@ class PostProcessor :
                         outFile,
                         branchSelection=self.branchsel,
                         outputbranchSelection=self.outputbranchsel,
-                        fullClone=fullClone, 
-                        maxEntries=self.maxEntries, 
-                        firstEntry=self.firstEntry,
+                        fullClone=fullClone,
                         jsonFilter=jsonFilter,
                         provenance=self.provenance)
             else : 
                 outFile = None
                 outTree = None
-                if self.branchsel:
-                  self.branchsel.selectBranches(inTree)
 
 	    # process events, if needed
 	    if not fullClone:
-                eventRange = xrange(self.firstEntry, self.firstEntry + nEntries) if nEntries > 0 and not elist else None
-		(nall, npass, timeLoop) = eventLoop(self.modules, inFile, outFile, inTree, outTree, eventRange=eventRange, maxEvents=self.maxEntries)
-		print 'Processed %d preselected entries from %s (%s entries). Finally selected %d entries' % (nall, fname, nEntries, npass)
+		(nall, npass, timeLoop) = eventLoop(self.modules, inFile, outFile, inTree, outTree)
+		print 'Processed %d preselected entries from %s (%s entries). Finally selected %d entries' % (nall, fname, inTree.GetEntries(), npass)
 	    else:
-                nall = nEntries
-		print 'Selected %d / %d entries from %s (%.2f%%)' % (outTree.tree().GetEntries(), nall, fname, outTree.tree().GetEntries()/(0.01*nall) if nall else 0)
+                nall = inTree.GetEntries()
+		print 'Selected %d entries from %s' % (outTree.tree().GetEntries(), fname)
 
 	    # now write the output
             if not self.noOut: 
@@ -204,17 +154,14 @@ class PostProcessor :
                 print "Done %s" % outFileName
 	    if self.jobReport:
 		self.jobReport.addInputFile(fname,nall)
-	    if self.prefetch:
-		if toBeDeleted: os.unlink(ftoread)
 		
 	for m in self.modules: m.endJob()
 	
-	print "Total time %.1f sec. to process %i events. Rate = %.1f Hz." %((time.time()-t0), totEntriesRead, totEntriesRead/(time.time()-t0))
+	print  totEntriesRead/(time.clock()-t0), "Hz"
 
 
 	if self.haddFileName :
-		haddnano = "./haddnano.py" if os.path.isfile("./haddnano.py") else "haddnano.py"
-		os.system("%s %s %s" %(haddnano, self.haddFileName," ".join(outFileNames)))
+		os.system("./haddnano.py %s %s" %(self.haddFileName," ".join(outFileNames))) #FIXME: remove "./" once haddnano.py is distributed with cms releases
 	if self.jobReport :
 		self.jobReport.addOutputFile(self.haddFileName)
 		self.jobReport.save()
